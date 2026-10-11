@@ -292,6 +292,16 @@ def latest_time(product_id: str) -> pd.Timestamp | None:
     return _utc(lines[-1]) if len(lines) >= 3 else None  # header, units row, value
 
 
+def first_time(product_id: str) -> pd.Timestamp | None:
+    """The product's earliest time step (the near-real-time sectors keep a rolling window of a few months)."""
+    p = PRODUCTS[product_id]
+    resp = _get(f"{p.server}/griddap/{p.dataset}.csv?time[0]")
+    if resp is None:
+        return None
+    lines = [line for line in resp.text.strip().splitlines() if line]
+    return _utc(lines[-1]) if len(lines) >= 3 else None
+
+
 def fetch(
     product_id: str, bbox: list[float], start: datetime, end: datetime
 ) -> xr.Dataset:
@@ -300,8 +310,18 @@ def fetch(
     The window is trimmed to the product's latest time step. An empty window returns a Dataset with a zero-length
     time axis rather than raising.
     """
+    return _fetch_window(product_id, bbox, start, end, latest_time(product_id))
+
+
+def _fetch_window(
+    product_id: str,
+    bbox: list[float],
+    start: datetime,
+    end: datetime,
+    last: pd.Timestamp | None,
+) -> xr.Dataset:
+    """`fetch` with the product's latest time already known (None: the product has no data)."""
     p = PRODUCTS[product_id]
-    last = latest_time(product_id)
     if last is not None and _utc(end) > last:
         end = last.to_pydatetime()
     resp = (
@@ -428,6 +448,155 @@ def composite(
     return out
 
 
+def fetch_range(
+    product_id: str,
+    bbox: list[float],
+    start: datetime,
+    end: datetime,
+    chunk_days: int = 10,
+) -> xr.Dataset:
+    """`fetch` over a long window in chunks of `chunk_days`, so each ERDDAP response stays small (the servers'
+    proxies refuse long requests); the chunks are joined on time.
+
+    The product's time range is looked up once, and the window is clamped to it (the near-real-time sectors keep
+    only a few months). A chunk that still fails after its retries is logged and skipped, so one bad request costs
+    those days rather than the whole series. Raises only when the time range itself cannot be read.
+    """
+    last = latest_time(product_id)
+    first = first_time(product_id) if last is not None else None
+    t0 = max(_utc(start), first) if first is not None else _utc(start)
+    t1 = min(_utc(end), last) if last is not None else _utc(end)
+    parts = []
+    while last is not None and t0 <= t1:
+        t_end = min(t1, t0 + pd.Timedelta(days=chunk_days) - pd.Timedelta(seconds=1))
+        try:
+            ds = _fetch_window(
+                product_id, bbox, t0.to_pydatetime(), t_end.to_pydatetime(), last
+            )
+        except Exception as exc:
+            logger.warning(
+                "satellite chunk skipped for %s, %s to %s: %s",
+                product_id,
+                _iso(t0),
+                _iso(t_end),
+                exc,
+            )
+        else:
+            if ds.sizes.get("time", 0):
+                parts.append(ds)
+        t0 = t_end + pd.Timedelta(seconds=1)
+    if not parts:
+        return _fetch_window(
+            product_id,
+            bbox,
+            _utc(end).to_pydatetime(),
+            _utc(start).to_pydatetime(),
+            None,
+        )  # empty
+    out = xr.concat(parts, dim="time") if len(parts) > 1 else parts[0]
+    _, keep = np.unique(out["time"].values, return_index=True)
+    return out.isel(time=np.sort(keep))
+
+
+def composite_series(
+    product_ids: list[str],
+    bbox: list[float],
+    frame_ends: list[datetime],
+    days: int = 7,
+) -> xr.Dataset:
+    """`composite` at each of `frame_ends` (ascending), from one fetch per product: for every frame, each pixel's
+    most recent valid value across the products within `days` before the frame's end, with its age in days.
+
+    Returns a Dataset with `value` and `age_days` (time, lat, lon; NaN where no pixel was valid within the window),
+    `time` being the frame ends, on the first available product's grid. Sensors that fail are skipped, as in
+    `composite`; a frame with no valid pixel is all NaN rather than an error.
+    """
+    if not frame_ends:
+        raise ValueError("no frame ends given")
+    ends = [_utc(t) for t in frame_ends]
+    if any(b <= a for a, b in zip(ends, ends[1:])):
+        raise ValueError("frame_ends must be strictly ascending")
+    start = ends[0] - pd.Timedelta(days=days)
+    slices: list[tuple[np.datetime64, int, np.ndarray]] = []
+    used: list[str] = []
+    lat = lon = None
+    name = PRODUCTS[product_ids[0]].name
+    units = ""
+    for pid in product_ids:
+        try:
+            ds = fetch_range(pid, bbox, start.to_pydatetime(), ends[-1].to_pydatetime())
+        except Exception as exc:  # one sensor's outage should not drop the others
+            logger.warning("satellite fetch failed for %s: %s", pid, exc)
+            continue
+        if ds.sizes.get("time", 0) == 0:
+            continue
+        da = ds[PRODUCTS[pid].name]
+        if lat is None or lon is None:
+            lat, lon = da["lat"].values, da["lon"].values
+            units = da.attrs.get("units", "")
+        elif not (
+            np.array_equal(da["lat"].values, lat)
+            and np.array_equal(da["lon"].values, lon)
+        ):
+            dlat = float(np.abs(np.diff(lat)).mean()) if lat.size > 1 else 0.01
+            da = da.reindex(lat=lat, lon=lon, method="nearest", tolerance=dlat / 2)
+        k = len(used)
+        used.append(pid)
+        for ti in range(da.sizes["time"]):
+            slices.append((_naive64(da["time"].values[ti]), k, da.isel(time=ti).values))
+    if lat is None or lon is None:
+        raise ValueError(
+            f"no valid data for {product_ids} between {_iso(start)} and {_iso(ends[-1])}"
+        )
+    slices.sort(key=lambda item: (item[0], item[1]))
+    shape = (lat.size, lon.size)
+    best = np.full(shape, np.nan, dtype=np.float32)
+    best_t = np.full(shape, np.datetime64("NaT"), dtype="datetime64[ns]")
+    values = np.full((len(ends),) + shape, np.nan, dtype=np.float32)
+    ages = np.full((len(ends),) + shape, np.nan, dtype=np.float32)
+    window = np.timedelta64(days * 86400, "s")
+    i = 0
+    for f, end in enumerate(ends):
+        t_end = _naive64(end)
+        while i < len(slices) and slices[i][0] <= t_end:
+            t, _, v = slices[i]
+            newer = np.isfinite(v) & (np.isnat(best_t) | (best_t <= t))
+            best[newer] = v[newer]
+            best_t[newer] = t
+            i += 1
+        age = t_end - best_t
+        ok = ~np.isnat(best_t) & (age <= window)
+        values[f][ok] = best[ok]
+        ages[f][ok] = (
+            age[ok].astype("timedelta64[s]").astype(np.float64) / 86400.0
+        ).astype(np.float32)
+    times = pd.DatetimeIndex([e.tz_localize(None) for e in ends])
+    return xr.Dataset(
+        {
+            "value": (
+                ("time", "lat", "lon"),
+                values,
+                {"units": units, "long_name": name},
+            ),
+            "age_days": (
+                ("time", "lat", "lon"),
+                ages,
+                {
+                    "units": "days",
+                    "long_name": "age of the pixel's value at the frame's end",
+                },
+            ),
+        },
+        coords={"time": times, "lat": lat, "lon": lon},
+        attrs={
+            "quantity": name,
+            "products": ",".join(used),
+            "attribution": "; ".join(sorted({PRODUCTS[p].attribution for p in used})),
+            "window_days": days,
+        },
+    )
+
+
 def mask_coast(ds: xr.Dataset, pixels: int = 1, var: str = "value") -> xr.Dataset:
     """Drop `pixels` of water along the shore, where land adjacency biases ocean colour.
 
@@ -439,7 +608,12 @@ def mask_coast(ds: xr.Dataset, pixels: int = 1, var: str = "value") -> xr.Datase
     if pixels <= 0:
         return ds
     water = np.isfinite(ds[var].values)
-    keep = binary_erosion(water, iterations=pixels, border_value=1)
+    if water.ndim == 3:  # a series: each frame on its own
+        keep = np.stack(
+            [binary_erosion(w, iterations=pixels, border_value=1) for w in water]
+        )
+    else:
+        keep = binary_erosion(water, iterations=pixels, border_value=1)
     out = ds.copy()
     for name in out.data_vars:
         if out[name].dims == ds[var].dims:
