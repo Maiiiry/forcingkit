@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forcingkit"
-version = "0.5.0"
+version = "0.6.0"
 description = "Spatiotemporal forcing for computational Earth-system models: selects, regrids and serves model-ready time series with provenance."
 readme = "README.md"
 requires-python = ">=3.11"
