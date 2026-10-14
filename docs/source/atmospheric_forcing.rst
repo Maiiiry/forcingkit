@@ -147,6 +147,27 @@ coastal domains from about 15 to 85 km across. Hourly radiation and precipitatio
 *Limits.* CONUS only. A forecast product, not a reanalysis: it carries forecast-model biases and is
 not homogeneous across HRRR versions (v4 since December 2020). Radiation is instantaneous.
 
+HRRR forecasts at points
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``forcingkit.fetchers.hrrr_points.fetch_points(cycles, leads, points, fields)`` returns HRRR forecasts
+at caller-supplied points for any cycles and lead hours, one row per (issue time, valid time, lead,
+point, field, value). Keeping both times makes the record bitemporal: a forecast can be compared
+with what was later observed, by how far ahead it was made. Fields are 10 m wind (rotated to east
+and north), gust, 2 m temperature and dew point, sea-level pressure and visibility, in the units
+HRRR publishes. Each point takes an inverse-distance-squared mean of up to four HRRR water cells
+within 6 km, so a coastal point never takes a land cell's temperature or wind.
+
+Leads a cycle does not carry are skipped (HRRR v4 runs to 48 h at 00, 06, 12 and 18 UTC and to
+18 h otherwise); a missing field in a published file raises. Three leads of seven fields at four
+points took 28 s on a warm connection, so one cycle's leads 1 to 18 take about three minutes.
+
+.. code-block:: python
+
+   from forcingkit.fetchers.hrrr_points import fetch_points
+
+   df = fetch_points(["2026-10-14T08:00"], [1, 6, 18], {"buoy": (-73.58, 40.96)})
+
 ERA5 (fallback)
 ~~~~~~~~~~~~~~~
 
