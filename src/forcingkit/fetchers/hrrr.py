@@ -57,16 +57,13 @@ def _fetch_s3_byte_ranges(
     Download specific byte ranges from an S3 object and concatenate into a
     single valid GRIB2 file. Each GRIB2 message is self-contained, so
     concatenating selected messages produces a valid file.
+
+    Each range is one ranged GET of exactly its bytes. A buffered file
+    (``fs.open`` then ``seek`` and ``read``) fetches whole blocks with
+    read-ahead, which for 1 to 2 MB messages downloaded about 38 times the
+    bytes needed (4.0 GB for 106 MB of messages in one HRRR cycle).
     """
     with open(output_path, "wb") as f:
         for start, end in ranges:
-            if end is not None:
-                length = end - start
-                with fs.open(s3_path, "rb") as s3f:
-                    s3f.seek(start)
-                    f.write(s3f.read(length))
-            else:
-                # Read from start to EOF
-                with fs.open(s3_path, "rb") as s3f:
-                    s3f.seek(start)
-                    f.write(s3f.read())
+            # end=None reads to the end of the object (the file's last message)
+            f.write(fs.cat_file(s3_path, start=start, end=end))
