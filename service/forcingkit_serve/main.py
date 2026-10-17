@@ -206,8 +206,10 @@ async def purge_cache() -> Dict[str, str]:
         return {"status": "success", "message": "Cache directory does not exist."}
 
 
+# Plain `def` for the tide and telemetry handlers too: their remote reads block, and FastAPI runs a
+# plain handler in its thread pool rather than on the event loop.
 @app.post("/api/v1/tide")
-async def get_tide_data(request: TideRequest) -> Dict[str, Any]:
+def get_tide_data(request: TideRequest) -> Dict[str, Any]:
     """Fetch and cache NOAA tide data for a given station and time window."""
     try:
         data = fetch_noaa_tide_data(
@@ -268,30 +270,40 @@ class TelemetryBBoxRequest(BaseModel):
     start_time: str  # ISO8601 string
     end_time: str  # ISO8601 string
     cache_bust: bool = False
+    # Substitute proxy stations, marked within_bbox false, when the box contains none.
+    allow_proxy_stations: bool = False
 
 
 @app.post("/api/v1/telemetry/station")
-async def get_station_telemetry(request: TelemetryRequest) -> Dict[str, Any]:
-    """Fetch 3-depth telemetry profile data for structural nudging."""
+def get_station_telemetry(request: TelemetryRequest) -> Dict[str, Any]:
+    """Fetch 3-depth telemetry profile data for structural nudging. `skipped` lists the datasets
+    left out because they, or their host, failed now or recently."""
     logger.info(
         f"Received telemetry request for station {request.station_id} from {request.start_time} to {request.end_time}"
     )
     try:
+        skipped: List[Dict[str, Any]] = []
         data = dispatch_station_profiles_request(
             station_id=request.station_id,
             start_time=request.start_time,
             end_time=request.end_time,
             cache_bust=request.cache_bust,
+            skipped=skipped,
         )
-        return {"status": "success", "data": data}
+        return {"status": "success", "data": data, "skipped": skipped}
     except Exception as e:
         logger.error(f"Telemetry fetch failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/telemetry/bbox")
-async def get_bbox_telemetry(request: TelemetryBBoxRequest) -> Dict[str, Any]:
-    """Fetch structured nudge telemetry for all stations in bounding box."""
+def get_bbox_telemetry(request: TelemetryBBoxRequest) -> Dict[str, Any]:
+    """Fetch structured nudge telemetry for all stations in bounding box.
+
+    `data` is empty when the box contains no known station, unless `allow_proxy_stations` is
+    set. Each station carries `within_bbox` and `distance_km`; `fallback` is true when any
+    returned station lies outside the box. `skipped` lists the datasets left out because they,
+    or their host, failed now or recently."""
     logger.info(
         f"Received bbox telemetry request for {request.bbox} from {request.start_time} to {request.end_time}"
     )
@@ -303,13 +315,22 @@ async def get_bbox_telemetry(request: TelemetryBBoxRequest) -> Dict[str, Any]:
             request.bbox.max_lon,
             request.bbox.max_lat,
         ]
+        skipped: List[Dict[str, Any]] = []
         data = dispatch_bounding_box_profiles_request(
             bbox=bbox_list,
             start_time=request.start_time,
             end_time=request.end_time,
             cache_bust=request.cache_bust,
+            allow_proxy_stations=request.allow_proxy_stations,
+            skipped=skipped,
         )
-        return {"status": "success", "data": data}
+        fallback = any(not st.get("within_bbox", True) for st in data.values())
+        return {
+            "status": "success",
+            "data": data,
+            "fallback": fallback,
+            "skipped": skipped,
+        }
     except Exception as e:
         logger.error(f"BBox telemetry fetch failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -37,4 +37,5 @@ def test_dispatch_station_profiles_request_wlis(mocker):
         end_time="2024-05-01T06:00:00Z",
         cache_dir=settings.cache_dir("erddap"),
         cache_bust=False,
+        skipped=None,
     )

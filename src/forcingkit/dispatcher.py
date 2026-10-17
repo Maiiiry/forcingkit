@@ -25,10 +25,12 @@ def dispatch_station_profiles_request(
         "erddap",
     ),
     cache_bust: bool = False,
+    skipped: Optional[list] = None,
 ) -> dict:
     """
     Tiered modality dispatcher for internal nudging profiles.
-    Currently routes WLIS directly to the ERDDAP fetcher.
+    Currently routes WLIS directly to the ERDDAP fetcher. Datasets left out (failed or
+    negatively cached) are appended to `skipped` when it is given.
     """
     logger.info(
         f"Dispatching station profile request for {station_id} ({start_time} to {end_time})"
@@ -44,6 +46,7 @@ def dispatch_station_profiles_request(
             end_time=end_time,
             cache_dir=cache_dir,
             cache_bust=cache_bust,
+            skipped=skipped,
         )
         return profiles
     except Exception as e:
@@ -60,9 +63,13 @@ def dispatch_bounding_box_profiles_request(
         "erddap",
     ),
     cache_bust: bool = False,
+    allow_proxy_stations: bool = False,
+    skipped: Optional[list] = None,
 ) -> dict:
     """
     Tiered modality dispatcher for internal nudging profiles across a domain.
+    A box with no known station returns {} unless allow_proxy_stations is set; see
+    fetch_erddap_stations_in_bbox.
     """
     logger.info(
         f"Dispatching bounded profile request for {bbox} ({start_time} to {end_time})"
@@ -77,6 +84,8 @@ def dispatch_bounding_box_profiles_request(
             end_time=end_time,
             cache_dir=cache_dir,
             cache_bust=cache_bust,
+            allow_proxy_stations=allow_proxy_stations,
+            skipped=skipped,
         )
         return profiles
     except Exception as e:

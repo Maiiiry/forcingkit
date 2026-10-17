@@ -69,3 +69,17 @@ def cache_dir(*parts: str) -> str:
 def max_workers(default: int = 4) -> int:
     """Threads for parallel remote reads (FORCINGKIT_MAX_WORKERS)."""
     return int(env("FORCINGKIT_MAX_WORKERS", str(default)) or default)
+
+
+def erddap_timeouts() -> tuple[float, float]:
+    """(connect, read) timeouts in seconds for ERDDAP profile reads
+    (FORCINGKIT_ERDDAP_CONNECT_TIMEOUT, default 10; FORCINGKIT_ERDDAP_READ_TIMEOUT, default 60)."""
+    connect = float(env("FORCINGKIT_ERDDAP_CONNECT_TIMEOUT", "10") or 10)
+    read = float(env("FORCINGKIT_ERDDAP_READ_TIMEOUT", "60") or 60)
+    return connect, read
+
+
+def erddap_failure_ttl() -> float:
+    """Seconds a failed ERDDAP host or dataset is skipped before it is tried again
+    (FORCINGKIT_ERDDAP_FAILURE_TTL, default 300; 0 turns the negative cache off)."""
+    return float(env("FORCINGKIT_ERDDAP_FAILURE_TTL", "300") or 0)

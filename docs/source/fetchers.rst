@@ -123,6 +123,14 @@ These serve validation rather than forcing:
 - **UConn ERDDAP** water-column profiles (``/api/v1/telemetry/station`` and ``/bbox``), from the
   `University of Connecticut Department of Marine Sciences <https://marinesciences.uconn.edu/>`__
   `ERDDAP server <http://merlin.dms.uconn.edu:8080/erddap/index.html>`__.
+  The station list holds four Long Island Sound moorings, so a box elsewhere contains none and
+  ``/bbox`` returns empty ``data``. Setting ``"allow_proxy_stations": true`` substitutes EXRX and
+  WLIS instead, for testing; every station carries ``within_bbox`` and ``distance_km`` (0 inside
+  the box), and the response's ``fallback`` is true when any lies outside it. Each dataset read
+  has a 10 s connect and 60 s read timeout (``FORCINGKIT_ERDDAP_CONNECT_TIMEOUT``,
+  ``FORCINGKIT_ERDDAP_READ_TIMEOUT``). A host that fails to connect, or a dataset that times out
+  or errors, is skipped for 300 s (``FORCINGKIT_ERDDAP_FAILURE_TTL``, 0 to turn off), and the
+  response's ``skipped`` lists each dataset left out, with the reason.
 
 NOAA OFS archive locations
 --------------------------
