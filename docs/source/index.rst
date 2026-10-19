@@ -166,5 +166,6 @@ PyPI as ``forcingkit``.
    :maxdepth: 1
    :caption: Reference
 
+   mesh_frames
    sources
    roadmap

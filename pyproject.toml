@@ -43,6 +43,7 @@ dependencies = [
     "dask[array]>=2026.3.0",
     "cftime>=1.6.5",
     "matplotlib>=3.10.9",
+    "pillow>=10.0",
 ]
 
 [tool.hatch.build.targets.wheel]
