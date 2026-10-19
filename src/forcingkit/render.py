@@ -144,6 +144,8 @@ def named_color(
 PACKAGED_RAMPS: dict[str, dict] = {
     # Surface currents, 0.02 to 3.1 m/s on a log axis; lightness falls monotonically.
     "currents_lis": {"log": True, "floor": 0.02},
+    # Its twin for a dark basemap: the same speeds, lightness rising monotonically.
+    "currents_lis_dark": {"log": True, "floor": 0.02},
 }
 
 

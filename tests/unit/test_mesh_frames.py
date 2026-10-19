@@ -320,9 +320,25 @@ def test_currents_ramp_rows_and_lightness():
     assert L[-1] == pytest.approx(25, abs=1.5)
 
 
-def test_currents_ramp_floor_log_axis_and_clamp():
-    rows = render.packaged_ramp_rows("currents_lis")
-    color = render.packaged_color("currents_lis")
+def test_dark_currents_ramp_matches_axis_and_rises_in_lightness():
+    light = np.array(render.packaged_ramp_rows("currents_lis"))
+    dark = np.array(render.packaged_ramp_rows("currents_lis_dark"))
+    assert len(dark) == 60
+    np.testing.assert_array_equal(dark[:, 0], light[:, 0])  # swap by theme alone
+    L = _lightness(dark[:, 1:])
+    assert np.all(np.diff(L) >= 0), "L* must not decrease along the dark ramp"
+    # Slack well above the dark basemap's water (rgb 27,27,29; L* 9.8); fast near white.
+    assert L[0] >= 18 and L[-1] >= 85
+    # Most of the change between 0.494 and 2.418 m/s.
+    s = dark[:, 0]
+    mid = L[np.isclose(s, 2.418, atol=5e-5)][0] - L[np.isclose(s, 0.494, atol=5e-5)][0]
+    assert mid > 0.5 * (L[-1] - L[0])
+
+
+@pytest.mark.parametrize("name", ["currents_lis", "currents_lis_dark"])
+def test_currents_ramp_floor_log_axis_and_clamp(name):
+    rows = render.packaged_ramp_rows(name)
+    color = render.packaged_color(name)
     first, last = (
         tuple(int(x) for x in rows[0][1:]),
         tuple(int(x) for x in rows[-1][1:]),

@@ -47,7 +47,10 @@ Colour
 - ``packaged_color("currents_lis")``: the surface-current table shipped with the package
   (``forcingkit/ramps/currents_lis.csv``), 0.02 to 3.1 m/s on a log axis, pale blue through
   yellow to dark green with CIELAB lightness falling monotonically. Its CSV header records the
-  knots and their source.
+  knots and their source;
+- ``packaged_color("currents_lis_dark")``: its twin for a dark basemap, on the same speeds, from
+  midnight blue through steel blue to pale seafoam with lightness rising monotonically, so the
+  two swap by theme alone.
 
 Python
 ------
@@ -80,7 +83,7 @@ Command line
      --size 1200x800 --ramp viridis --vmax 1.5 \
      --edges 0,0,0,40 --background 242,243,240 --out frames/
 
-``--ramp`` takes a built-in name, a packaged table (``currents_lis``) or a path to a
+``--ramp`` takes a built-in name, a packaged table (``currents_lis``, ``currents_lis_dark``) or a path to a
 ``value,r,g,b[,a]`` CSV (with ``--log`` and ``--floor``). The output directory receives
 ``frame_0000.png``, ``frame_0001.png``, ... and ``frames.json``, which lists the frame times, the box
 and the size.
