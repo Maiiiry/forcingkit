@@ -367,7 +367,29 @@ def test_dark_currents_ramp_matches_axis_and_rises_in_lightness():
     _assert_cool_hues(dark[:, 1:])
 
 
-@pytest.mark.parametrize("name", ["currents_lis", "currents_lis_dark"])
+@pytest.mark.parametrize(
+    ("name", "falling"), [("currents_lis_deep", True), ("currents_lis_haline", False)]
+)
+def test_multi_hue_currents_ramps_share_the_axis(name, falling):
+    light = np.array(render.packaged_ramp_rows("currents_lis"))
+    rows = np.array(render.packaged_ramp_rows(name))
+    np.testing.assert_array_equal(rows[:, 0], light[:, 0])
+    L = _lightness(rows[:, 1:])
+    steps = np.diff(L)
+    assert np.all(steps <= 0) if falling else np.all(steps >= 0), (
+        "lightness must be monotone"
+    )
+    # No warning hues: nothing between red and orange-yellow among the coloured rows.
+    lab = _lab(rows[:, 1:])
+    hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1])) % 360
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    assert not np.any((chroma > 10) & ((hue < 80) | (hue > 340))), hue
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["currents_lis", "currents_lis_dark", "currents_lis_deep", "currents_lis_haline"],
+)
 def test_currents_ramp_floor_log_axis_and_clamp(name):
     rows = render.packaged_ramp_rows(name)
     color = render.packaged_color(name)

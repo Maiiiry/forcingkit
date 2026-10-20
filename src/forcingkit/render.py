@@ -146,6 +146,10 @@ PACKAGED_RAMPS: dict[str, dict] = {
     "currents_lis": {"log": True, "floor": 0.02},
     # Its twin for a dark basemap: the same speeds, lightness rising monotonically.
     "currents_lis_dark": {"log": True, "floor": 0.02},
+    # Multi-hue alternatives on the same speeds, after cmocean "deep" (light backgrounds; lightness
+    # falling) and "haline" (dark; rising), for a field shown alone with its legend.
+    "currents_lis_deep": {"log": True, "floor": 0.02},
+    "currents_lis_haline": {"log": True, "floor": 0.02},
 }
 
 

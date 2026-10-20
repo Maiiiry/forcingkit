@@ -1,0 +1,71 @@
+# Currents speed ramp after cmocean "deep" (Thyng et al. 2016; cmocean is MIT licensed):
+# speed_m_s,r,g,b (sRGB), on the same speeds as currents_lis. Interpolate in log(speed); speeds below the
+# first row take its colour (floor 0.02 m/s) and speeds above the last row (3.1 m/s) clamp to it.
+# Multi-hue for light backgrounds, for a field shown alone with its legend (exports, animations): pale
+# green at slack through teal and navy to deep purple, lightness falling with speed. Colormap position
+# is piecewise linear in log(speed): 0.02 -> 0.12 (past deep's pale-yellow start, so slack never reads
+# as sand), 0.494 -> 0.38, 2.418 -> 0.80, 3.097 -> 1.0.
+# Knots from 2026 NOAA CO-OPS current predictions (MAX_SLACK), Long Island Sound and Block Island
+# Sound: regional median daily maximum 0.494 m/s; ACT2611 Little Gull Island median daily maximum
+# 2.418 m/s, 95th percentile 2.964 m/s, annual maximum 3.097 m/s.
+speed_m_s,r,g,b
+0.0200,191,231,174
+0.0221,187,230,172
+0.0244,183,229,171
+0.0270,178,227,170
+0.0299,172,225,168
+0.0330,167,224,167
+0.0365,163,222,166
+0.0403,159,221,165
+0.0446,154,219,165
+0.0493,150,218,164
+0.0545,146,216,164
+0.0602,141,215,163
+0.0666,137,213,163
+0.0736,133,211,163
+0.0813,129,210,163
+0.0899,125,208,163
+0.0994,120,206,163
+0.1099,117,204,163
+0.1215,113,202,163
+0.1343,110,200,163
+0.1484,107,198,163
+0.1641,105,196,164
+0.1813,102,194,164
+0.2005,100,193,164
+0.2216,98,191,164
+0.2449,96,189,164
+0.2708,94,187,164
+0.2993,92,185,164
+0.3309,90,183,164
+0.3657,88,179,164
+0.4043,87,177,164
+0.4469,86,175,164
+0.4940,85,173,163
+0.5348,82,168,163
+0.5790,79,162,162
+0.6269,77,157,161
+0.6787,75,152,160
+0.7348,73,146,159
+0.7955,72,141,157
+0.8613,70,136,156
+0.9324,68,130,155
+1.0095,67,125,154
+1.0929,65,119,153
+1.1833,64,114,152
+1.2810,63,109,151
+1.3869,62,103,149
+1.5015,62,98,148
+1.6256,62,92,147
+1.7600,62,86,145
+1.9054,63,80,142
+2.0629,65,74,137
+2.2334,65,69,131
+2.4180,65,64,123
+2.5198,63,57,108
+2.6259,60,51,95
+2.7365,56,45,81
+2.8518,51,39,68
+2.9719,45,32,55
+3.0970,40,26,44
+3.1000,40,26,44
