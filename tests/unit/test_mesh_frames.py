@@ -297,13 +297,44 @@ def test_necofs_adapter_spans_archive_days(monkeypatch):
 # Packaged currents ramp ------------------------------------------------------------------------
 
 
-def _lightness(rgb: np.ndarray) -> np.ndarray:
-    """CIELAB L* (D65) of sRGB rows."""
+def _lab(rgb: np.ndarray) -> np.ndarray:
+    """CIELAB (D65) of sRGB rows: columns L*, a*, b*."""
     c = np.asarray(rgb, dtype=np.float64) / 255.0
     lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
-    y = lin @ np.array([0.2126729, 0.7151522, 0.0721750])
-    f = np.where(y > (6 / 29) ** 3, np.cbrt(y), y / (3 * (6 / 29) ** 2) + 4 / 29)
-    return 116 * f - 16
+    m = np.array(
+        [
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ]
+    )
+    xyz = lin @ m.T / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > (6 / 29) ** 3, np.cbrt(xyz), xyz / (3 * (6 / 29) ** 2) + 4 / 29)
+    return np.stack(
+        [116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]), 200 * (f[:, 1] - f[:, 2])],
+        axis=-1,
+    )
+
+
+def _lightness(rgb: np.ndarray) -> np.ndarray:
+    """CIELAB L* (D65) of sRGB rows."""
+    return _lab(rgb)[:, 0]
+
+
+def _knot_lightness(rows: np.ndarray) -> list[float]:
+    """L* at the ramp's knots: the floor, 0.494, 2.418 and 3.097 m/s."""
+    L = _lightness(rows[:, 1:])
+    return [
+        float(L[np.isclose(rows[:, 0], k, atol=5e-5)][0])
+        for k in (0.02, 0.494, 2.418, 3.097)
+    ]
+
+
+def _assert_cool_hues(rgb: np.ndarray) -> None:
+    """Aqua to teal only: no chart-land buff, drying green, warning red or orange, nor wind's violet."""
+    lab = _lab(rgb)
+    hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1])) % 360
+    assert np.all((hue >= 180) & (hue <= 220)), hue
 
 
 def test_currents_ramp_rows_and_lightness():
@@ -316,8 +347,10 @@ def test_currents_ramp_rows_and_lightness():
         assert np.isclose(speed, knot, atol=5e-5).any()
     L = _lightness(rgb)
     assert np.all(np.diff(L) <= 0), "L* must not increase along the ramp"
-    assert 92 <= L[0] < 95.7  # lighter than the yellow, darker than land at L* 95.7
-    assert L[-1] == pytest.approx(25, abs=1.5)
+    assert 92 <= L[0] < 95.7  # darker than the light basemap's land at L* 95.7
+    # Knot targets: pale aqua, aqua, teal, deep blue-green.
+    assert _knot_lightness(rows) == pytest.approx([93, 83, 50, 25], abs=1.5)
+    _assert_cool_hues(rgb)
 
 
 def test_dark_currents_ramp_matches_axis_and_rises_in_lightness():
@@ -327,12 +360,11 @@ def test_dark_currents_ramp_matches_axis_and_rises_in_lightness():
     np.testing.assert_array_equal(dark[:, 0], light[:, 0])  # swap by theme alone
     L = _lightness(dark[:, 1:])
     assert np.all(np.diff(L) >= 0), "L* must not decrease along the dark ramp"
-    # Slack well above the dark basemap's water (rgb 27,27,29; L* 9.8); fast near white.
+    # Slack well above the dark basemap's water (rgb 27,27,29; L* 9.8); fast near white. The knots mirror
+    # the light ramp's (93, 83, 50, 25): deep blue-teal, dark teal, seafoam, pale seafoam.
     assert L[0] >= 18 and L[-1] >= 85
-    # Most of the change between 0.494 and 2.418 m/s.
-    s = dark[:, 0]
-    mid = L[np.isclose(s, 2.418, atol=5e-5)][0] - L[np.isclose(s, 0.494, atol=5e-5)][0]
-    assert mid > 0.5 * (L[-1] - L[0])
+    assert _knot_lightness(dark) == pytest.approx([20, 40, 76, 90], abs=1.5)
+    _assert_cool_hues(dark[:, 1:])
 
 
 @pytest.mark.parametrize("name", ["currents_lis", "currents_lis_dark"])
