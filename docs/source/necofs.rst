@@ -247,6 +247,84 @@ From Python, either stream records yourself or assemble them in memory:
 
    ds = fetch_necofs_boundary_conditions("2026-09-26T00:00:00Z", 24, bbox)
 
+Full-depth subset on the native mesh
+------------------------------------
+
+For work that needs FVCOM's own geometry rather than a regular grid (3D rendering of the sigma
+prisms, particle tracking with FVCOM's own interpolation, comparisons element by element),
+``volume(bbox, start, end)`` returns every sigma layer for the elements whose centroids lie in
+the box, with no regridding and no vertical conversion. ``read_volume(bbox, start_time, hours,
+dap_url=None)`` does the same for one file.
+
+.. code-block:: python
+
+   from forcingkit.fetchers.necofs import volume
+
+   bbox = [-72.22, 41.10, -71.75, 41.395]  # Fishers Island and The Race, with a margin
+   vol = volume(bbox, "2026-04-02T00Z", "2026-04-04T00Z")  # 49 hourly records
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 26 52
+
+   * - Name
+     - Dimensions
+     - Meaning
+   * - ``u``, ``v``, ``ww``
+     - (time, siglay, element)
+     - Velocities at element layer centres, m s-1. ``ww`` is the vertical velocity in z, which
+       FVCOM derives from the sigma-coordinate velocity omega; omega itself is not archived.
+   * - ``temp``, ``salinity``
+     - (time, siglay, node)
+     - At node layer centres.
+   * - ``zeta``; ``h``
+     - (time, node); (node)
+     - Surface elevation; depth below the geoid, positive down.
+   * - ``siglay``, ``siglev``
+     - (siglay, node), (siglev, node)
+     - Sigma at layer centres and interfaces, surface first. The depth of a layer centre is
+       :math:`\sigma (h + \zeta) + \zeta`.
+   * - ``x``, ``y``; ``xc``, ``yc``
+     - (node); (element)
+     - The model's own Cartesian coordinates in metres, NAD83 / Maine West (EPSG:26984).
+   * - ``node_lon``, ``node_lat``; ``lonc``, ``latc``
+     - (node); (element)
+     - Degrees.
+   * - ``triangles``
+     - (element, vertex)
+     - Zero-based indices into the returned nodes.
+   * - ``neighbours``
+     - (element, vertex)
+     - The element across the edge opposite each vertex (FVCOM's ``NBE`` order), as an index into
+       the returned elements; ``NO_NEIGHBOUR`` (-1) on the mesh boundary, ``OUTSIDE_SUBSET`` (-2)
+       where the neighbour exists but was not selected.
+   * - ``on_boundary``
+     - (node)
+     - The node lies on the mesh boundary (coast or open boundary).
+   * - ``element_id``, ``node_id``
+     - (element); (node)
+     - Indices in the full mesh.
+
+The archive does not carry FVCOM's edge-neighbour table, so ``neighbours`` and ``on_boundary`` are
+rebuilt from ``nv`` over the **whole** mesh (``forcingkit.mesh_frames.element_neighbours``): on
+the subset alone, every element along the subset's edge would look like a coastal element.
+
+Every requested hour must be found, and every archive file must select the same elements;
+otherwise ``volume`` raises. Results are cached as Zarr under
+``$FORCINGKIT_CACHE_DIR/necofs/volume/``, keyed by the schema (``volume-v1``), the box and the
+window. Hyperslabs are fetched with ``FORCINGKIT_MAX_WORKERS`` threads. Even so, the 48 hours
+above (2,831 elements, 1,829 nodes, 45 layers, about 110 MB) took about five minutes from SMAST
+on 2026-10-22, almost all of it server round trips, and 0.1 s from the cache.
+
+Wetting and drying
+~~~~~~~~~~~~~~~~~~
+
+GOM7 runs with FVCOM's wet/dry treatment, although no file attribute says so and the wet/dry
+masks are not archived. The data show it: the total depth :math:`h + \zeta` never falls below
+0.200 m, thousands of nodes sit exactly at that floor at low water (5,641 in the record of
+2026-04-02 12:00 UTC), and 99 % of the elements whose three nodes are at the floor carry exactly
+zero ``u``, ``v`` and ``ww``. Treat an element as dry when all three of its nodes are at the floor.
+
 Notes and limits
 ----------------
 
@@ -275,6 +353,13 @@ tag, and the passing of donor options through the dispatcher.
 .. code-block:: bash
 
    uv run pytest tests/unit/test_necofs_parent.py -v
+
+``tests/unit/test_necofs_volume.py`` covers the full-depth subset on a synthetic FVCOM file:
+every value lands on its own element, node, layer and hour; neighbours are mutual, and the
+subset's edge is never mistaken for the coast; boundary nodes; windows assembled across
+archive files (the midnight record in its own day's file); a missing hour raising; and the
+cache. ``tests/integration/test_necofs_volume_live.py`` reads three hours across a file
+boundary from SMAST.
 
 References
 ----------

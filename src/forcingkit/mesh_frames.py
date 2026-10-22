@@ -226,3 +226,25 @@ def _necofs_surface(
             "bbox": list(bbox),
         },
     )
+
+
+def element_neighbours(tri: np.ndarray) -> np.ndarray:
+    """(n_tri, 3) edge-neighbour table of a triangle mesh: entry (i, j) is the element across the
+    edge opposite vertex j of element i (FVCOM's `NBE` order), or -1 where that edge is on the
+    mesh boundary. `tri` holds zero-based node indices. Raises ValueError if an edge is shared
+    by more than two elements."""
+    tri = np.asarray(tri, dtype=np.int64)
+    n_tri = tri.shape[0]
+    a = tri[:, [1, 2, 0]].ravel()
+    b = tri[:, [2, 0, 1]].ravel()
+    key = np.minimum(a, b) * (int(tri.max(initial=0)) + 1) + np.maximum(a, b)
+    order = np.argsort(key, kind="stable")
+    ks = key[order]
+    if ks.size > 2 and np.any(ks[2:] == ks[:-2]):
+        raise ValueError("an edge is shared by more than two elements")
+    pair = np.flatnonzero(ks[1:] == ks[:-1])
+    out = np.full(3 * n_tri, -1, dtype=np.int64)
+    first, second = order[pair], order[pair + 1]
+    out[first] = second // 3
+    out[second] = first // 3
+    return out.reshape(n_tri, 3)

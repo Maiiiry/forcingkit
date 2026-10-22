@@ -528,3 +528,342 @@ def read_surface(
             "requested_bbox": list(bbox),
         },
     )
+
+
+# Full-depth subset schema. Bump when the layout or meaning of a cached volume changes.
+VOLUME_SCHEMA = "volume-v1"
+
+# Neighbour codes in the `neighbours` table of `read_volume` and `volume`.
+NO_NEIGHBOUR = -1  # the edge is on the mesh boundary (coast or open boundary)
+OUTSIDE_SUBSET = -2  # the neighbour exists but lies outside the subset
+
+
+def _open_archive(url: str) -> tuple[xr.Dataset, pd.DatetimeIndex]:
+    """An FVCOM file opened over OPeNDAP with CF times decoded, and its times as naive UTC."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ds_raw = xr.open_dataset(url, engine="pydap", decode_times=False)
+    drop_vars = [v for v in ["Itime", "Itime2"] if v in ds_raw.variables]
+    ds = xr.decode_cf(ds_raw.drop_vars(drop_vars))
+    times = pd.DatetimeIndex(ds.time.values)
+    if times.tz is not None:
+        times = times.tz_convert("UTC").tz_localize(None)
+    return ds, times
+
+
+def _read_columns(
+    da: xr.DataArray, dim: str, idx: np.ndarray, t_slice: slice | None
+) -> np.ndarray:
+    """`da` at the sorted indices `idx` of its last dimension `dim`, read in a few hyperslabs
+    fetched concurrently (`settings.max_workers`).
+
+    Node indices in a coastal box are scattered across the mesh, so runs merge only short gaps:
+    for the Fishers Island box a 2048 gap reads one slab of 76,356 nodes to get 1,829, while 256
+    reads 59 slabs of 1,877 in a fifth of the time. Each slab costs a server round trip of about
+    0.3 to 1 s, hence the threads."""
+    import concurrent.futures
+
+    runs = _index_runs(idx, max_gap=256)
+
+    def fetch(run):
+        a, b = run
+        sel = idx[(idx >= a) & (idx <= b)]
+        slab = {dim: slice(a, b + 1)}
+        if t_slice is not None:
+            slab["time"] = t_slice
+        return np.asarray(da.isel(slab).values)[..., sel - a]
+
+    with concurrent.futures.ThreadPoolExecutor(settings.max_workers()) as pool:
+        blocks = list(pool.map(fetch, runs))
+    return np.concatenate(blocks, axis=-1).astype(np.float32, copy=False)
+
+
+VOLUME_VARIABLE_ATTRS = {
+    "u": {"units": "m s-1", "long_name": "eastward current at element layer centres"},
+    "v": {"units": "m s-1", "long_name": "northward current at element layer centres"},
+    "ww": {
+        "units": "m s-1",
+        "long_name": "upward velocity in z at element layer centres (FVCOM ww, not omega)",
+    },
+    "temp": {
+        "units": "degree_Celsius",
+        "long_name": "temperature at node layer centres",
+    },
+    "salinity": {"units": "1e-3", "long_name": "salinity at node layer centres"},
+    "zeta": {"units": "m", "long_name": "surface elevation at nodes", "positive": "up"},
+    "h": {
+        "units": "m",
+        "long_name": "depth below the geoid at nodes",
+        "positive": "down",
+    },
+    "siglay": {"long_name": "sigma at layer centres, surface first", "positive": "up"},
+    "siglev": {
+        "long_name": "sigma at layer interfaces, surface first",
+        "positive": "up",
+    },
+    "x": {"units": "m", "long_name": "node easting, model Cartesian (EPSG:26984)"},
+    "y": {"units": "m", "long_name": "node northing, model Cartesian (EPSG:26984)"},
+    "xc": {"units": "m", "long_name": "element centroid easting (EPSG:26984)"},
+    "yc": {"units": "m", "long_name": "element centroid northing (EPSG:26984)"},
+    "triangles": {"long_name": "zero-based indices into the returned nodes"},
+    "neighbours": {
+        "long_name": "element across the edge opposite each vertex, as an index into the "
+        "returned elements; -1 on the mesh boundary, -2 outside the subset",
+    },
+    "on_boundary": {
+        "long_name": "node lies on the mesh boundary (coast or open boundary)"
+    },
+    "element_id": {"long_name": "zero-based element index in the full mesh"},
+    "node_id": {"long_name": "zero-based node index in the full mesh"},
+}
+
+
+def _subset_volume(
+    ds: xr.Dataset, times: pd.DatetimeIndex, bbox, wanted: pd.DatetimeIndex, url: str
+) -> xr.Dataset:
+    """The full-depth subset of an opened FVCOM file (see `read_volume`)."""
+    from forcingkit.mesh_frames import element_neighbours
+
+    min_lon, min_lat, max_lon, max_lat = bbox
+    lonc = np.asarray(ds["lonc"].values, dtype=np.float64)
+    latc = np.asarray(ds["latc"].values, dtype=np.float64)
+    elems = np.flatnonzero(
+        (lonc >= min_lon) & (lonc <= max_lon) & (latc >= min_lat) & (latc <= max_lat)
+    )
+    if elems.size == 0:
+        raise ValueError(f"No NECOFS elements inside {bbox}")
+
+    nv = np.asarray(ds["nv"].values).T.astype(np.int64) - 1  # (element, 3), zero-based
+    tri_global = nv[elems]
+    nodes, tri_local = np.unique(tri_global, return_inverse=True)
+    tri_local = tri_local.reshape(tri_global.shape).astype(np.int32)
+
+    # Neighbours and boundary nodes come from the whole mesh: on the subset alone every element
+    # on the subset's edge would look like a boundary element.
+    nbe_all = element_neighbours(nv)
+    nbe = nbe_all[elems]
+    pos = np.clip(np.searchsorted(elems, np.where(nbe >= 0, nbe, 0)), 0, elems.size - 1)
+    selected = (nbe >= 0) & (elems[pos] == nbe)
+    neighbours = np.where(
+        nbe < 0, NO_NEIGHBOUR, np.where(selected, pos, OUTSIDE_SUBSET)
+    ).astype(np.int32)
+    open_edge = nbe_all < 0
+    boundary_nodes = np.unique(
+        np.concatenate(
+            [nv[open_edge[:, j], (j + 1) % 3] for j in range(3)]
+            + [nv[open_edge[:, j], (j + 2) % 3] for j in range(3)]
+        )
+    )
+    on_boundary = np.isin(nodes, boundary_nodes)
+
+    t_idx = times.get_indexer(wanted)
+    keep = t_idx >= 0
+    if not keep.any():
+        raise RuntimeError(
+            f"{url} holds {times[0]} to {times[-1]}, none of {wanted[0]} to {wanted[-1]}"
+        )
+    t_idx, wanted = t_idx[keep], wanted[keep]
+    t0, t1 = int(t_idx.min()), int(t_idx.max())
+    t_slice, rows = slice(t0, t1 + 1), t_idx - t0
+
+    def at_elements(name):
+        return _read_columns(ds[name], "nele", elems, t_slice)[rows]
+
+    def at_nodes(name):
+        return _read_columns(ds[name], "node", nodes, t_slice)[rows]
+
+    def static_nodes(name):
+        return _read_columns(ds[name], "node", nodes, None)
+
+    def coord(name, idx):
+        return np.asarray(ds[name].values, dtype=np.float64)[idx]
+
+    lay, lev, ele, nod = "siglay", "siglev", "element", "node"
+    data = {
+        "u": (("time", lay, ele), at_elements("u")),
+        "v": (("time", lay, ele), at_elements("v")),
+        "ww": (("time", lay, ele), at_elements("ww")),
+        "temp": (("time", lay, nod), at_nodes("temp")),
+        "salinity": (("time", lay, nod), at_nodes("salinity")),
+        "zeta": (("time", nod), at_nodes("zeta")),
+        "h": ((nod,), static_nodes("h")),
+        "siglay": ((lay, nod), static_nodes("siglay")),
+        "siglev": ((lev, nod), static_nodes("siglev")),
+        "x": ((nod,), coord("x", nodes)),
+        "y": ((nod,), coord("y", nodes)),
+        "node_lon": ((nod,), coord("lon", nodes)),
+        "node_lat": ((nod,), coord("lat", nodes)),
+        "xc": ((ele,), coord("xc", elems)),
+        "yc": ((ele,), coord("yc", elems)),
+        "lonc": ((ele,), lonc[elems]),
+        "latc": ((ele,), latc[elems]),
+        "triangles": ((ele, "vertex"), tri_local),
+        "neighbours": ((ele, "vertex"), neighbours),
+        "on_boundary": ((nod,), on_boundary),
+        "element_id": ((ele,), elems.astype(np.int64)),
+        "node_id": ((nod,), nodes.astype(np.int64)),
+    }
+    out = xr.Dataset(data, coords={"time": wanted})
+    for name, attrs in VOLUME_VARIABLE_ATTRS.items():
+        out[name].attrs.update(attrs)
+    out.attrs.update(
+        {
+            "type": "NECOFS/FVCOM GOM7 full-depth subset on the model mesh",
+            "source": "UMass Dartmouth SMAST",
+            "url": url,
+            "requested_bbox": list(bbox),
+            "schema": VOLUME_SCHEMA,
+            "crs_xy": "EPSG:26984",
+        }
+    )
+    logger.info(
+        f"NECOFS volume: {elems.size} elements, {nodes.size} nodes, "
+        f"{ds.sizes['siglay']} layers, {len(wanted)} hours from {url}"
+    )
+    return out
+
+
+def read_volume(
+    bbox: list[float],
+    start_time: str | pd.Timestamp,
+    hours: int,
+    dap_url: str | None = None,
+) -> xr.Dataset:
+    """Every sigma layer on the FVCOM mesh itself (no regridding, no vertical conversion), for the
+    elements whose centres lie in `bbox` = [min_lon, min_lat, max_lon, max_lat] and the nodes of
+    those elements, hourly from `start_time` for `hours` (hours the file does not hold are left
+    out).
+
+    Returns dims (time, siglay, siglev, element, node, vertex):
+
+    - `u`, `v`, `ww` (time, siglay, element): velocities at element layer centres. `ww` is the
+      vertical velocity in z, which FVCOM derives from the sigma velocity omega; omega itself is
+      not in the archive.
+    - `temp`, `salinity` (time, siglay, node); `zeta` (time, node); `h` (node).
+    - `siglay` (siglay, node), `siglev` (siglev, node): sigma, surface first, so the depth of a
+      layer centre is `siglay * (h + zeta) + zeta`.
+    - `x`, `y`, `xc`, `yc`: the model's own Cartesian coordinates in metres (EPSG:26984);
+      `node_lon`, `node_lat`, `lonc`, `latc` in degrees.
+    - `triangles` (element, vertex): indices into the returned nodes.
+    - `neighbours` (element, vertex): the element across the edge opposite each vertex (FVCOM's
+      `NBE` order), as an index into the returned elements; NO_NEIGHBOUR (-1) where the edge is
+      on the mesh boundary and OUTSIDE_SUBSET (-2) where the neighbour was not selected. Both are
+      found on the whole mesh, so the subset's own edge is never mistaken for the coast.
+    - `on_boundary` (node): the node lies on the mesh boundary.
+    - `element_id`, `node_id`: indices in the full mesh.
+
+    Reads the rolling GOM7 forecast unless `dap_url` names another file (for example an archive
+    day from `get_necofs_url`). For a window that spans several archive files, use `volume`.
+    """
+    url = dap_url or NECOFS_GOM7_URL
+    ds, times = _open_archive(url)
+    start = pd.Timestamp(start_time)
+    start = start.tz_convert("UTC").tz_localize(None) if start.tzinfo else start
+    wanted = pd.date_range(start.floor("h"), periods=hours, freq="1h")
+    return _subset_volume(ds, times, bbox, wanted, url)
+
+
+def volume_cache_key(bbox, start: pd.Timestamp, end: pd.Timestamp) -> str:
+    """Cache key of a `volume` request: the schema, the box to 1e-4 degree and the window."""
+    import hashlib
+    import json
+
+    key = json.dumps(
+        {
+            "schema": VOLUME_SCHEMA,
+            "bbox": [round(float(b), 4) for b in bbox],
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+        sort_keys=True,
+    )
+    return "necofs_volume_" + hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def volume(
+    bbox: list[float],
+    start: str | pd.Timestamp,
+    end: str | pd.Timestamp,
+    cache: bool = True,
+    reader=read_volume,
+) -> xr.Dataset:
+    """`read_volume` for every hour from `start` to `end` inclusive (UTC; naive times are UTC),
+    assembled across the daily archive files that hold them.
+
+    Raises rather than returning a short window: every requested hour must be found, and every file
+    must select the same elements. With `cache`, the result is stored as a zarr store under
+    `cache_dir("necofs", "volume")` and later calls with the same box and window read it from
+    there. Pad `bbox` yourself if a margin beyond the area of interest is needed (for example for
+    particle tracking near the edge of the subset). `reader` is for tests.
+    """
+    import os
+    import shutil
+
+    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
+    t0 = t0.tz_convert("UTC").tz_localize(None) if t0.tzinfo else t0
+    t1 = t1.tz_convert("UTC").tz_localize(None) if t1.tzinfo else t1
+    t0 = t0.floor("h")
+    if t1 < t0:
+        raise ValueError(f"end {t1} precedes start {t0}")
+    wanted = pd.date_range(t0, t1, freq="1h")
+
+    path = None
+    if cache:
+        path = settings.cache_dir(
+            "necofs", "volume", volume_cache_key(bbox, t0, t1) + ".zarr"
+        )
+        if os.path.isdir(path):
+            logger.info(f"NECOFS volume from cache {path}")
+            return xr.open_zarr(path, consolidated=True).load()
+
+    groups: list[tuple[str, list[pd.Timestamp]]] = []
+    url_by_day: dict[pd.Timestamp, str] = {}
+    for t in wanted:
+        day = necofs_archive_file_date(t)
+        if day not in url_by_day:
+            url_by_day[day] = get_necofs_url(day - pd.Timedelta(days=1))
+        url = url_by_day[day]
+        if groups and groups[-1][0] == url:
+            groups[-1][1].append(t)
+        else:
+            groups.append((url, [t]))
+
+    parts: list[xr.Dataset] = []
+    seen: set[pd.Timestamp] = set()
+    for url, ts in groups:
+        hours = int((ts[-1] - ts[0]) / pd.Timedelta(hours=1)) + 1
+        part = reader(bbox, ts[0], hours, dap_url=url)
+        if parts and not np.array_equal(
+            part["element_id"].values, parts[0]["element_id"].values
+        ):
+            raise RuntimeError(f"{url} subsets a different set of elements for {bbox}")
+        fresh = [
+            t
+            for t in pd.DatetimeIndex(part["time"].values)
+            if t in ts and t not in seen
+        ]
+        seen.update(fresh)
+        if fresh:
+            parts.append(part.sel(time=fresh))
+    missing = wanted.difference(pd.DatetimeIndex(sorted(seen)))
+    if len(missing):
+        raise RuntimeError(
+            f"NECOFS lacks {len(missing)} of {len(wanted)} hours from {t0} to {t1} "
+            f"(first missing {missing[0]})"
+        )
+
+    static = [k for k, v in parts[0].data_vars.items() if "time" not in v.dims]
+    out = xr.concat([p.drop_vars(static) for p in parts], dim="time").sortby("time")
+    out = out.assign({k: parts[0][k] for k in static})
+    out.attrs = dict(parts[0].attrs)
+    out.attrs.pop("url", None)
+    out.attrs["urls"] = [url for url, _ in groups]
+
+    if path is not None:
+        tmp = path + ".partial"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        out.to_zarr(tmp, mode="w", consolidated=True, zarr_format=2)
+        os.replace(tmp, path)
+        logger.info(f"NECOFS volume cached at {path}")
+    return out
